@@ -36,7 +36,6 @@ class UART_RX( Elaboratable ):
   def __init__( self, clk_freq, baud_rate ):
     # Calculate the clock divider for the given frequency / baud rate.
     self.clk_div = clock_divider( clk_freq, baud_rate, 0.05 )
-
     # Signals with external connections.
     self.rx        = Signal()
     # Internal signals.
@@ -124,7 +123,6 @@ class UART_TX( Elaboratable ):
   def __init__( self, clk_freq, baud_rate ):
     # Calculate the clock divider for the given frequency / baud rate.
     self.clk_div = clock_divider( clk_freq, baud_rate, 0.05 )
-
     # Signals with external connections.
     self.tx        = Signal()
     # TX signals.
@@ -149,62 +147,87 @@ class UART_TX( Elaboratable ):
 
     return m
 
+# Combined UART interface with both TX and RX modules.
+class UART( Elaboratable ):
+  def __init__( self, uart_rx, uart_tx ):
+    self.uart_rx = uart_rx
+    self.uart_tx = uart_tx
+
+  def elaborate( self, platform ):
+    m = Module()
+    m.submodules.rx = self.uart_rx
+    m.submodules.tx = self.uart_tx
+    return m
+
 #
 # Simple UART testbench.
 #
 
-# Helper UART test method to simulate transmitting a byte.
-def uart_rx_test( dut, val ):
-  # Send a "start bit".
-  yield dut.rx.eq( 0 )
+# Helper UART test method to simulate receiving a byte.
+def uart_rx_byte( uart, val ):
+  # Simulate a "start bit".
+  yield uart.rx.eq( 0 )
   # Wait one cycle.
-  for i in range( dut.clk_div ):
+  for i in range( uart.clk_div ):
     yield Tick()
-  # Send the byte with one cycle between each bit.
+  # Simulate the byte with one cycle between each bit.
   for i in range( 8 ):
     if val & ( 1 << i ):
-      yield dut.rx.eq( 1 )
+      yield uart.rx.eq( 1 )
     else:
-      yield dut.rx.eq( 0 )
-    for j in range( dut.clk_div ):
+      yield uart.rx.eq( 0 )
+    for j in range( uart.clk_div ):
       yield Tick()
-  # Send the "stop bit", and wait one cycle.
-  yield dut.rx.eq( 1 )
-  for i in range( dut.clk_div ):
+  # Simulate the "stop bit", and wait one cycle.
+  yield uart.rx.eq( 1 )
+  for i in range( uart.clk_div ):
     yield Tick()
 
-# UART testbench.
-def uart_test( dut ):
+# UART 'receive' testbench.
+def uart_rx_test( uart_rx ):
   # Simulate receiving "0xAF".
-  yield from uart_rx_test( dut, 0xAF )
+  yield from uart_rx_byte( uart_rx, 0xAF )
   # Wait a couple of cycles, then send "rx_ack".
-  for i in range( dut.clk_div * 2 ):
+  for i in range( uart_rx.clk_div * 2 ):
     yield Tick()
-  yield dut.rx_ack.eq( 1 )
+  yield uart_rx.rx_ack.eq( 1 )
   # Simulate receiving "0x42".
-  yield from uart_rx_test( dut, 0x42 )
+  yield from uart_rx_byte( uart_rx, 0x42 )
   # Simulate receiving "0x24" (should cause an error)
-  yield from uart_rx_test( dut, 0x24 )
+  yield from uart_rx_byte( uart_rx, 0x24 )
   # Wait a cycle, then send the "fix" signal and re-send 0x24.
-  for i in range( dut.clk_div ):
+  for i in range( uart_rx.clk_div ):
     yield Tick()
-  yield dut.rx_fix.eq( 1 )
-  yield from uart_rx_test( dut, 0x24 )
+  yield uart_rx.rx_fix.eq( 1 )
+  yield from uart_rx_byte( uart_rx, 0x24 )
   # Send "rx_ack" and wait a cycle to see the end state.
-  yield dut.rx_ack.eq( 1 )
-  for i in range( dut.clk_div ):
+  yield uart_rx.rx_ack.eq( 1 )
+  for i in range( uart_rx.clk_div ):
     yield Tick()
+
+# UART 'transmit' testbench.
+def uart_tx_test( uart_tx ):
+  # TODO
+  yield Tick()
 
 # Create a UART module and run tests on it.
 # (The baud rate is set to a high value to speed up the simulation.)
 if __name__ == "__main__":
-  #dut = UART_RX( 24000000, 9600 )
-  dut = UART_RX( 24000000, 1000000 )
-  with Simulator( dut, vcd_file = open( 'test.vcd', 'w' ) ) as sim:
-    def proc():
-      yield from uart_test( dut )
+  #uart_rx = UART_RX( 24000000, 9600 )
+  #uart_tx = UART_TX( 24000000, 9600 )
+  uart_rx = UART_RX( 24000000, 1000000 )
+  uart_tx = UART_TX( 24000000, 1000000 )
+  uart    = UART( uart_rx, uart_tx )
+
+  # Run the UART tests.
+  with Simulator( uart, vcd_file = open( 'test.vcd', 'w' ) ) as sim:
+    def proc_rx():
+      yield from uart_rx_test( uart.uart_rx )
+    def proc_tx():
+      yield from uart_tx_test( uart.uart_tx )
 
     # Run the UART test with a 24MHz clock.
     sim.add_clock( 24e-6 )
-    sim.add_sync_process( proc )
+    sim.add_sync_process( proc_rx )
+    sim.add_sync_process( proc_tx )
     sim.run()
