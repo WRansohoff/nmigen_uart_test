@@ -129,6 +129,7 @@ class UART_TX( Elaboratable ):
     self.tx_count  = Signal( range( self.clk_div ) )
     self.tx_buf    = Signal( 8 )
     self.tx_bit    = Signal( 3 )
+    self.tx_new    = Signal()
     self.tx_fix    = Signal()
     self.tx_strobe = Signal()
 
@@ -143,7 +144,58 @@ class UART_TX( Elaboratable ):
     # Toggle the "tx_strobe" value whenever "tx_count" ticks over.
     m.d.comb += self.tx_strobe.eq( self.tx_count == 0 )
 
-    # TODO: TX module state machine.
+    # TX state machine.
+    with m.FSM() as fsm:
+      # TX state machine: "Idle" state.
+      # - Move to "Start" state when the "tx_new" signal goes high.
+      #   - Set "tx_count" divider to 1, and reset the other signals.
+      #   - Send a start bit by pulling "tx" low.
+      with m.State( "TX_IDLE" ):
+        with m.If( self.tx_new ):
+          m.next = "TX_START"
+          m.d.sync += [
+            self.tx_new.eq( 0 ),
+            self.tx_fix.eq( 0 ),
+            self.tx_bit.eq( 0 ),
+            self.tx_count.eq( 1 ),
+            self.tx.eq( 0 )
+          ]
+      # TX state machine: "Start" state.
+      # - Wait a cycle until the clock divider ticks over, then
+      #   move to the "Data" state.
+      # - Move to the "Error" state if an unexpected "tx_new" occurs.
+      with m.State( "TX_START" ):
+        with m.If( self.tx_strobe ):
+          m.next = "TX_DATA"
+        with m.Elif( self.tx_new ):
+          m.next = "TX_ERROR"
+      # TX state machine: "Data" state.
+      # - Set the "tx" value based on the current bit.
+      # - Wait a cycle, then increment the bit number.
+      #   - Move to the "Stop" state iff 8 bits have been sent.
+      # - Move to the "Error" state if an unexpected "tx_new" occurs.
+      with m.State( "TX_DATA" ):
+        m.d.sync += self.tx.eq( self.tx_buf.bit_select( self.tx_bit, 1 ) )
+        with m.If( self.tx_strobe ):
+          m.d.sync += self.tx_bit.eq( self.tx_bit + 1 )
+          with m.If( self.tx_bit == 7 ):
+            m.next = "TX_STOP"
+        with m.Elif( self.tx_new ):
+          m.next = "TX_ERROR"
+      # TX state machine: "Stop" state.
+      # - Pull the "tx" line high, clear the "tx_buf" buffer,
+      #   and then wait one cycle before moving.
+      #   to the "Idle" state.
+      with m.State( "TX_STOP" ):
+        m.d.sync += self.tx.eq( 1 )
+        m.d.sync += self.tx_buf.eq( 0x00 )
+        with m.If( self.tx_strobe ):
+          m.next = "TX_IDLE"
+      # TX state machine: "Error" state.
+      with m.State( "TX_ERROR" ):
+        with m.If( self.tx_fix ):
+          m.next = "TX_IDLE"
+          m.d.sync += self.tx.eq( 1 )
 
     return m
 
@@ -183,6 +235,23 @@ def uart_rx_byte( uart, val ):
   for i in range( uart.clk_div ):
     yield Tick()
 
+# Helper UART test method to simulate transmitting a buffered byte.
+def uart_tx_byte( uart ):
+  # Send a "start bit".
+  yield uart.tx.eq( 0 )
+  # Wait one cycle.
+  for i in range( uart.clk_div ):
+    yield Tick()
+  # Send the byte with one cycle between each bit.
+  for i in range( 8 ):
+    yield uart.tx.eq( uart.tx_buf.bit_select( i, 1 ) )
+    for j in range( uart.clk_div ):
+      yield Tick()
+  # Send the "stop bit", and wait one cycle.
+  yield uart.tx.eq( 1 )
+  for i in range( uart.clk_div ):
+    yield Tick()
+
 # UART 'receive' testbench.
 def uart_rx_test( uart_rx ):
   # Simulate receiving "0xAF".
@@ -207,8 +276,22 @@ def uart_rx_test( uart_rx ):
 
 # UART 'transmit' testbench.
 def uart_tx_test( uart_tx ):
-  # TODO
-  yield Tick()
+  # Set the "tx_buf" value to 0xAF, and set the "tx_new" signal.
+  yield uart_tx.tx_buf.eq( 0xAF )
+  yield uart_tx.tx_new.eq( 1 )
+  # Simulate transmitting the byte.
+  yield from uart_tx_byte( uart_tx )
+  # Wait a couple of cycles.
+  for i in range( uart_tx.clk_div * 2 ):
+    yield Tick()
+  # Setup the TX module to send 0x42.
+  yield uart_tx.tx_buf.eq( 0x42 )
+  yield uart_tx.tx_new.eq( 1 )
+  # Simulate sending the byte.
+  yield from uart_tx_byte( uart_tx )
+  # Wait a cycle to see the end state.
+  for i in range( uart_tx.clk_div ):
+    yield Tick()
 
 # Create a UART module and run tests on it.
 # (The baud rate is set to a high value to speed up the simulation.)
